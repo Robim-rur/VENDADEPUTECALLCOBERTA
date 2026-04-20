@@ -1,114 +1,82 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from scipy.stats import norm
+from datetime import datetime
 
 # ---------------------------------------------------
-# CONFIG
+# CONFIGURAÇÃO
 # ---------------------------------------------------
-st.set_page_config(page_title="Scanner Semanal TOP 3", layout="wide")
+st.set_page_config(
+    page_title="BOVA11 Wheel Strategy Pro",
+    layout="wide"
+)
 
 # ---------------------------------------------------
-# PARÂMETROS DO USUÁRIO (SEU SETUP)
+# PARÂMETROS FIXOS
 # ---------------------------------------------------
-ATIVOS = ["BOVA11", "BBAS3", "PETR4", "VALE3", "ITUB4"]
-
-TAXA = 0.15
-TAXAS_B3 = 0.0003
-
-META_SEMANAL = 0.005  # 0,50%
+IR = 0.15
+TAXAS = 0.0003
+SELIC = 0.1075
+VOL = 0.20
+META_SEMANAL = 0.005   # 0,50%
+TICKER = "BOVA11.SA"
 
 # ---------------------------------------------------
 # FUNÇÕES
 # ---------------------------------------------------
 
-def calcular_retorno_liquido(premio, capital):
+def prob_exercicio(S, K, T, r, sigma, tipo):
+    try:
+        if T <= 0:
+            return 0
+
+        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+
+        if tipo == "CALL":
+            return norm.cdf(d2)
+        else:
+            return norm.cdf(-d2)
+
+    except:
+        return 0
+
+
+def preco_atual():
+    try:
+        ativo = yf.Ticker(TICKER)
+        hist = ativo.history(period="5d")
+        return float(hist["Close"].dropna().iloc[-1])
+    except:
+        return None
+
+
+def vencimentos():
+    try:
+        ativo = yf.Ticker(TICKER)
+        return list(ativo.options)
+    except:
+        return []
+
+
+def buscar_chain(venc):
+    try:
+        ativo = yf.Ticker(TICKER)
+        return ativo.option_chain(venc)
+    except:
+        return None
+
+
+def retorno_liquido(premio, capital):
     bruto = premio / capital
-    liquido = (bruto - TAXAS_B3) * (1 - TAXA)
+    liquido = (bruto - TAXAS) * (1 - IR)
     return liquido
 
 
-def calcular_score(retorno, distancia):
-    """
-    Score de equilíbrio:
-    - maior retorno = melhor
-    - menor distância = melhor
-    """
-    return (retorno * 100) - (distancia * 10)
-
-
-def gerar_dados_exemplo():
-    """
-    ⚠️ Substituir futuramente por dados reais
-    """
-    np.random.seed(42)
-
-    dados = []
-
-    for ativo in ATIVOS:
-        preco = np.random.uniform(20, 150)
-
-        for i in range(10):
-
-            # PUT
-            strike_put = preco * np.random.uniform(0.90, 0.98)
-            premio_put = np.random.uniform(0.2, 1.2)
-
-            ret_put = calcular_retorno_liquido(premio_put, strike_put)
-            dist_put = (preco - strike_put) / preco
-
-            score_put = calcular_score(ret_put, dist_put)
-
-            dados.append({
-                "Ativo": ativo,
-                "Tipo": "PUT",
-                "Preço": preco,
-                "Strike": strike_put,
-                "Prêmio": premio_put,
-                "Retorno": ret_put,
-                "Distância": dist_put,
-                "Score": score_put
-            })
-
-            # CALL
-            strike_call = preco * np.random.uniform(1.02, 1.10)
-            premio_call = np.random.uniform(0.2, 1.0)
-
-            ret_call = calcular_retorno_liquido(premio_call, preco)
-            dist_call = (strike_call - preco) / preco
-
-            score_call = calcular_score(ret_call, dist_call)
-
-            dados.append({
-                "Ativo": ativo,
-                "Tipo": "CALL",
-                "Preço": preco,
-                "Strike": strike_call,
-                "Prêmio": premio_call,
-                "Retorno": ret_call,
-                "Distância": dist_call,
-                "Score": score_call
-            })
-
-    return pd.DataFrame(dados)
-
-
-def processar():
-    df = gerar_dados_exemplo()
-
-    # filtro meta mínima
-    df = df[df["Retorno"] >= META_SEMANAL]
-
-    if df.empty:
-        return df
-
-    # ordenação
-    df = df.sort_values(by="Score", ascending=False)
-
-    # top 3
-    df = df.head(3)
-
-    return df
+def score_operacao(retorno, prob):
+    return (retorno * 100) + (prob * 100)
 
 
 # ---------------------------------------------------
@@ -117,30 +85,156 @@ def processar():
 
 def main():
 
-    st.title("📈 Scanner Semanal TOP 3")
-    st.caption("Wheel Strategy | PUT + CALL | Meta ≥ 0,50% líquido")
+    st.title("📈 BOVA11 Wheel Strategy Pro")
+    st.caption("Somente BOVA11 | PUT e CALL semanal | Meta líquida 0,50%")
 
-    df = processar()
+    operacao = st.sidebar.selectbox(
+        "Tipo de Operação",
+        ["PUT", "CALL"]
+    )
 
-    if df.empty:
-        st.warning("Nenhuma oportunidade dentro da meta hoje.")
+    # ---------------------------------------------------
+    # PREÇO ATUAL
+    # ---------------------------------------------------
+    preco = preco_atual()
+
+    if preco is None:
+        st.error("Erro ao buscar preço do BOVA11.")
         return
 
-    # formatação
-    df_exibir = df.copy()
+    st.metric("Preço Atual BOVA11", f"R$ {preco:.2f}")
 
-    df_exibir["Preço"] = df_exibir["Preço"].map(lambda x: f"R$ {x:.2f}")
-    df_exibir["Strike"] = df_exibir["Strike"].map(lambda x: f"R$ {x:.2f}")
-    df_exibir["Prêmio"] = df_exibir["Prêmio"].map(lambda x: f"R$ {x:.2f}")
-    df_exibir["Retorno"] = df_exibir["Retorno"].map(lambda x: f"{x*100:.2f}%")
-    df_exibir["Distância"] = df_exibir["Distância"].map(lambda x: f"{x*100:.2f}%")
-    df_exibir["Score"] = df_exibir["Score"].map(lambda x: f"{x:.2f}")
+    # ---------------------------------------------------
+    # VENCIMENTOS
+    # ---------------------------------------------------
+    exps = vencimentos()
+
+    if not exps:
+        st.error("Yahoo Finance não retornou vencimentos hoje.")
+        return
+
+    hoje = datetime.now()
+
+    validos = []
+
+    for v in exps:
+        try:
+            data_v = datetime.strptime(v, "%Y-%m-%d")
+            dias = (data_v - hoje).days
+
+            if 1 <= dias <= 15:
+                validos.append(v)
+
+        except:
+            pass
+
+    if not validos:
+        st.warning("Nenhum vencimento semanal encontrado.")
+        return
+
+    venc = st.selectbox("Escolha o vencimento", validos)
+
+    # ---------------------------------------------------
+    # OPTION CHAIN
+    # ---------------------------------------------------
+    chain = buscar_chain(venc)
+
+    if chain is None:
+        st.error("Erro ao carregar opções.")
+        return
+
+    if operacao == "PUT":
+        tabela = chain.puts.copy()
+    else:
+        tabela = chain.calls.copy()
+
+    if tabela.empty:
+        st.warning("Sem opções disponíveis.")
+        return
+
+    # ---------------------------------------------------
+    # PROCESSAMENTO
+    # ---------------------------------------------------
+    T = (datetime.strptime(venc, "%Y-%m-%d") - hoje).days / 365
+
+    lista = []
+
+    for _, row in tabela.iterrows():
+
+        try:
+            strike = float(row["strike"])
+
+            bid = float(row["bid"]) if pd.notna(row["bid"]) else 0
+            ask = float(row["ask"]) if pd.notna(row["ask"]) else 0
+            last = float(row["lastPrice"]) if pd.notna(row["lastPrice"]) else 0
+
+            premio = 0
+
+            if bid > 0:
+                premio = bid
+            elif last > 0:
+                premio = last
+            elif ask > 0:
+                premio = ask
+
+            if premio <= 0:
+                continue
+
+            capital = strike if operacao == "PUT" else preco
+
+            retorno = retorno_liquido(premio, capital)
+
+            if retorno < META_SEMANAL:
+                continue
+
+            prob = prob_exercicio(
+                preco,
+                strike,
+                T,
+                SELIC,
+                VOL,
+                operacao
+            )
+
+            score = score_operacao(retorno, prob)
+
+            lista.append({
+                "Contrato": row["contractSymbol"],
+                "Strike": strike,
+                "Prêmio": premio,
+                "Retorno Líquido (%)": retorno * 100,
+                "Probabilidade (%)": prob * 100,
+                "Score": score
+            })
+
+        except:
+            pass
+
+    # ---------------------------------------------------
+    # RESULTADO
+    # ---------------------------------------------------
+    if not lista:
+        st.warning("Nenhuma operação dentro da meta hoje.")
+        return
+
+    df = pd.DataFrame(lista)
+
+    df = df.sort_values(by="Score", ascending=False).head(3)
+
+    df["Strike"] = df["Strike"].map(lambda x: f"R$ {x:.2f}")
+    df["Prêmio"] = df["Prêmio"].map(lambda x: f"R$ {x:.2f}")
+    df["Retorno Líquido (%)"] = df["Retorno Líquido (%)"].map(lambda x: f"{x:.2f}%")
+    df["Probabilidade (%)"] = df["Probabilidade (%)"].map(lambda x: f"{x:.2f}%")
+    df["Score"] = df["Score"].map(lambda x: f"{x:.2f}")
 
     st.subheader("🏆 TOP 3 Oportunidades")
 
-    st.dataframe(df_exibir, use_container_width=True)
+    st.dataframe(df, use_container_width=True)
 
-    st.info("Filtro aplicado: ≥ 0,50% líquido semanal")
+    st.success("Atualiza automaticamente ao abrir.")
+
+    with st.expander("Debug"):
+        st.write("Vencimentos encontrados:", exps)
 
 
 if __name__ == "__main__":
