@@ -1,265 +1,146 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-from scipy.stats import norm
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ---------------------------------------------------
 # CONFIG
 # ---------------------------------------------------
-st.set_page_config(
-    page_title="BOVA11 Expert - Wheel Strategy",
-    layout="wide"
-)
+st.set_page_config(page_title="Scanner Semanal TOP 3", layout="wide")
+
+# ---------------------------------------------------
+# PARÂMETROS DO USUÁRIO (SEU SETUP)
+# ---------------------------------------------------
+ATIVOS = ["BOVA11", "BBAS3", "PETR4", "VALE3", "ITUB4"]
+
+TAXA = 0.15
+TAXAS_B3 = 0.0003
+
+META_SEMANAL = 0.005  # 0,50%
 
 # ---------------------------------------------------
 # FUNÇÕES
 # ---------------------------------------------------
-def calculate_probability(S, K, T, r, sigma, option_type="call"):
+
+def calcular_retorno_liquido(premio, capital):
+    bruto = premio / capital
+    liquido = (bruto - TAXAS_B3) * (1 - TAXA)
+    return liquido
+
+
+def calcular_score(retorno, distancia):
     """
-    Aproximação Black-Scholes para chance de exercício
+    Score de equilíbrio:
+    - maior retorno = melhor
+    - menor distância = melhor
     """
-    try:
-        if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-            return 0
-
-        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
-
-        if option_type == "call":
-            return norm.cdf(d2)
-        else:
-            return norm.cdf(-d2)
-
-    except:
-        return 0
+    return (retorno * 100) - (distancia * 10)
 
 
-def get_current_price():
+def gerar_dados_exemplo():
     """
-    Busca preço atual BOVA11
+    ⚠️ Substituir futuramente por dados reais
     """
-    try:
-        asset = yf.Ticker("BOVA11.SA")
-        hist = asset.history(period="5d")
+    np.random.seed(42)
 
-        if hist.empty:
-            return None
+    dados = []
 
-        return float(hist["Close"].dropna().iloc[-1])
+    for ativo in ATIVOS:
+        preco = np.random.uniform(20, 150)
 
-    except:
-        return None
+        for i in range(10):
+
+            # PUT
+            strike_put = preco * np.random.uniform(0.90, 0.98)
+            premio_put = np.random.uniform(0.2, 1.2)
+
+            ret_put = calcular_retorno_liquido(premio_put, strike_put)
+            dist_put = (preco - strike_put) / preco
+
+            score_put = calcular_score(ret_put, dist_put)
+
+            dados.append({
+                "Ativo": ativo,
+                "Tipo": "PUT",
+                "Preço": preco,
+                "Strike": strike_put,
+                "Prêmio": premio_put,
+                "Retorno": ret_put,
+                "Distância": dist_put,
+                "Score": score_put
+            })
+
+            # CALL
+            strike_call = preco * np.random.uniform(1.02, 1.10)
+            premio_call = np.random.uniform(0.2, 1.0)
+
+            ret_call = calcular_retorno_liquido(premio_call, preco)
+            dist_call = (strike_call - preco) / preco
+
+            score_call = calcular_score(ret_call, dist_call)
+
+            dados.append({
+                "Ativo": ativo,
+                "Tipo": "CALL",
+                "Preço": preco,
+                "Strike": strike_call,
+                "Prêmio": premio_call,
+                "Retorno": ret_call,
+                "Distância": dist_call,
+                "Score": score_call
+            })
+
+    return pd.DataFrame(dados)
 
 
-def get_expirations():
-    """
-    Busca vencimentos disponíveis
-    """
-    try:
-        asset = yf.Ticker("BOVA11.SA")
-        exps = asset.options
-        return list(exps)
-    except:
-        return []
+def processar():
+    df = gerar_dados_exemplo()
 
+    # filtro meta mínima
+    df = df[df["Retorno"] >= META_SEMANAL]
 
-def get_chain(exp):
-    """
-    Busca chain
-    """
-    try:
-        asset = yf.Ticker("BOVA11.SA")
-        return asset.option_chain(exp)
-    except:
-        return None
+    if df.empty:
+        return df
+
+    # ordenação
+    df = df.sort_values(by="Score", ascending=False)
+
+    # top 3
+    df = df.head(3)
+
+    return df
 
 
 # ---------------------------------------------------
 # APP
 # ---------------------------------------------------
+
 def main():
 
-    st.title("🎯 BOVA11 Expert - Wheel Strategy")
-    st.subheader("Venda Coberta / Venda de PUT")
+    st.title("📈 Scanner Semanal TOP 3")
+    st.caption("Wheel Strategy | PUT + CALL | Meta ≥ 0,50% líquido")
 
-    st.sidebar.header("Configurações")
+    df = processar()
 
-    op_type = st.sidebar.selectbox(
-        "Tipo de Operação",
-        [
-            "Venda de PUT",
-            "Venda de CALL"
-        ]
-    )
-
-    tax_rate = 0.15
-    fees = 0.0003
-    r = 0.1075
-    sigma = 0.20
-
-    # ---------------------------------------------------
-    # PREÇO
-    # ---------------------------------------------------
-    current_price = get_current_price()
-
-    if current_price is None:
-        st.error("Não foi possível carregar preço do BOVA11.")
+    if df.empty:
+        st.warning("Nenhuma oportunidade dentro da meta hoje.")
         return
 
-    st.metric("Preço Atual BOVA11", f"R$ {current_price:.2f}")
+    # formatação
+    df_exibir = df.copy()
 
-    # ---------------------------------------------------
-    # VENCIMENTOS
-    # ---------------------------------------------------
-    expirations = get_expirations()
+    df_exibir["Preço"] = df_exibir["Preço"].map(lambda x: f"R$ {x:.2f}")
+    df_exibir["Strike"] = df_exibir["Strike"].map(lambda x: f"R$ {x:.2f}")
+    df_exibir["Prêmio"] = df_exibir["Prêmio"].map(lambda x: f"R$ {x:.2f}")
+    df_exibir["Retorno"] = df_exibir["Retorno"].map(lambda x: f"{x*100:.2f}%")
+    df_exibir["Distância"] = df_exibir["Distância"].map(lambda x: f"{x*100:.2f}%")
+    df_exibir["Score"] = df_exibir["Score"].map(lambda x: f"{x:.2f}")
 
-    if not expirations:
-        st.error("Yahoo não retornou vencimentos hoje.")
-        return
+    st.subheader("🏆 TOP 3 Oportunidades")
 
-    today = datetime.now()
+    st.dataframe(df_exibir, use_container_width=True)
 
-    valid_exp = []
-
-    for exp in expirations:
-        try:
-            d = datetime.strptime(exp, "%Y-%m-%d")
-            days = (d - today).days
-
-            # faixa ampliada
-            if 1 <= days <= 45:
-                valid_exp.append(exp)
-
-        except:
-            pass
-
-    if not valid_exp:
-        st.warning("Nenhum vencimento encontrado entre 1 e 45 dias.")
-        st.write("Vencimentos disponíveis:", expirations)
-        return
-
-    selected_exp = st.selectbox("Escolha vencimento", valid_exp)
-
-    # ---------------------------------------------------
-    # CHAIN
-    # ---------------------------------------------------
-    chain = get_chain(selected_exp)
-
-    if chain is None:
-        st.error("Falha ao carregar opções.")
-        return
-
-    if op_type == "Venda de PUT":
-        options = chain.puts.copy()
-        option_side = "put"
-    else:
-        options = chain.calls.copy()
-        option_side = "call"
-
-    if options.empty:
-        st.warning("Sem opções disponíveis.")
-        return
-
-    # ---------------------------------------------------
-    # PROCESSAMENTO
-    # ---------------------------------------------------
-    T = (datetime.strptime(selected_exp, "%Y-%m-%d") - today).days / 365
-
-    rows = []
-
-    for _, row in options.iterrows():
-
-        try:
-            strike = float(row["strike"])
-
-            bid = float(row["bid"]) if pd.notna(row["bid"]) else 0
-            ask = float(row["ask"]) if pd.notna(row["ask"]) else 0
-            last = float(row["lastPrice"]) if pd.notna(row["lastPrice"]) else 0
-
-            # melhor prêmio possível
-            premium = 0
-
-            if bid > 0:
-                premium = bid
-            elif last > 0:
-                premium = last
-            elif ask > 0:
-                premium = ask
-
-            if premium <= 0:
-                continue
-
-            capital = strike if option_side == "put" else current_price
-
-            bruto = premium / capital
-            liquido = (bruto - fees) * (1 - tax_rate)
-
-            prob = calculate_probability(
-                current_price,
-                strike,
-                T,
-                r,
-                sigma,
-                option_side
-            )
-
-            rows.append(
-                {
-                    "Contrato": row["contractSymbol"],
-                    "Strike": strike,
-                    "Prêmio": premium,
-                    "Retorno Líquido (%)": liquido * 100,
-                    "Prob. Exercício (%)": prob * 100,
-                }
-            )
-
-        except:
-            pass
-
-    # ---------------------------------------------------
-    # RESULTADO
-    # ---------------------------------------------------
-    if not rows:
-        st.warning("Nenhuma opção líquida encontrada hoje.")
-        return
-
-    df = pd.DataFrame(rows)
-
-    df = df.sort_values(
-        by=["Prob. Exercício (%)", "Retorno Líquido (%)"],
-        ascending=False
-    )
-
-    meta = 0.50
-
-    def color_target(v):
-        if v >= meta:
-            return "background-color: lightgreen"
-        return ""
-
-    st.write("### Ranking das Melhores Oportunidades")
-
-    styled = df.style.format(
-        {
-            "Strike": "R$ {:.2f}",
-            "Prêmio": "R$ {:.2f}",
-            "Retorno Líquido (%)": "{:.2f}%",
-            "Prob. Exercício (%)": "{:.2f}%"
-        }
-    ).applymap(
-        color_target,
-        subset=["Retorno Líquido (%)"]
-    )
-
-    st.dataframe(styled, use_container_width=True)
-
-    st.info("Verde = retorno líquido acima de 0,50%.")
-
-    with st.expander("Debug"):
-        st.write("Vencimentos encontrados:", expirations)
-        st.write("Total de opções processadas:", len(df))
+    st.info("Filtro aplicado: ≥ 0,50% líquido semanal")
 
 
 if __name__ == "__main__":
