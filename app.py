@@ -1,241 +1,513 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-from scipy.stats import norm
-from datetime import datetime
+import yfinance as yf
+import ta
+import plotly.graph_objects as go
 
-# ---------------------------------------------------
-# CONFIGURAÇÃO
-# ---------------------------------------------------
+# =========================================================
+# CONFIG
+# =========================================================
+
 st.set_page_config(
-    page_title="BOVA11 Wheel Strategy Pro",
+    page_title="Crypto Probability Engine",
     layout="wide"
 )
 
-# ---------------------------------------------------
-# PARÂMETROS FIXOS
-# ---------------------------------------------------
-IR = 0.15
-TAXAS = 0.0003
-SELIC = 0.1075
-VOL = 0.20
-META_SEMANAL = 0.005   # 0,50%
-TICKER = "BOVA11.SA"
+# =========================================================
+# TITLE
+# =========================================================
 
-# ---------------------------------------------------
-# FUNÇÕES
-# ---------------------------------------------------
+st.title("🧠 Crypto Probability Engine")
 
-def prob_exercicio(S, K, T, r, sigma, tipo):
-    try:
-        if T <= 0:
-            return 0
+st.markdown("""
+Motor probabilístico estrutural para:
 
-        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
+- BNB
+- XRP
+- LINK
+- SOLANA
+- ETHEREUM
 
-        if tipo == "CALL":
-            return norm.cdf(d2)
-        else:
-            return norm.cdf(-d2)
+O sistema mede:
 
-    except:
-        return 0
+- tendência
+- força
+- momentum
+- compressão
+- volatilidade
+- comportamento histórico semelhante
 
+E responde:
 
-def preco_atual():
-    try:
-        ativo = yf.Ticker(TICKER)
-        hist = ativo.history(period="5d")
-        return float(hist["Close"].dropna().iloc[-1])
-    except:
-        return None
+# 👉 Qual a chance matemática do ativo subir +X%?
+""")
 
+# =========================================================
+# SIDEBAR
+# =========================================================
 
-def vencimentos():
-    try:
-        ativo = yf.Ticker(TICKER)
-        return list(ativo.options)
-    except:
-        return []
+st.sidebar.header("⚙️ Configurações")
 
+ativos = {
+    "Ethereum (ETH)": "ETH-USD",
+    "Solana (SOL)": "SOL-USD",
+    "BNB": "BNB-USD",
+    "XRP": "XRP-USD",
+    "Chainlink (LINK)": "LINK-USD"
+}
 
-def buscar_chain(venc):
-    try:
-        ativo = yf.Ticker(TICKER)
-        return ativo.option_chain(venc)
-    except:
-        return None
+ativo_nome = st.sidebar.selectbox(
+    "Escolha o ativo",
+    list(ativos.keys())
+)
 
+ticker = ativos[ativo_nome]
 
-def retorno_liquido(premio, capital):
-    bruto = premio / capital
-    liquido = (bruto - TAXAS) * (1 - IR)
-    return liquido
+period = st.sidebar.selectbox(
+    "Histórico",
+    ["2y", "5y", "10y"],
+    index=2
+)
 
+target_gain = st.sidebar.slider(
+    "Gain alvo (%)",
+    1.0,
+    15.0,
+    3.0,
+    0.5
+)
 
-def score_operacao(retorno, prob):
-    return (retorno * 100) + (prob * 100)
+future_bars = st.sidebar.slider(
+    "Máximo candles futuros",
+    1,
+    30,
+    10
+)
 
+# =========================================================
+# DATA
+# =========================================================
 
-# ---------------------------------------------------
-# APP
-# ---------------------------------------------------
+@st.cache_data
+def load_data(ticker_symbol, period_selected):
 
-def main():
-
-    st.title("📈 BOVA11 Wheel Strategy Pro")
-    st.caption("Somente BOVA11 | PUT e CALL semanal | Meta líquida 0,50%")
-
-    operacao = st.sidebar.selectbox(
-        "Tipo de Operação",
-        ["PUT", "CALL"]
+    df = yf.download(
+        ticker_symbol,
+        period=period_selected,
+        interval="1d",
+        auto_adjust=True,
+        progress=False
     )
 
-    # ---------------------------------------------------
-    # PREÇO ATUAL
-    # ---------------------------------------------------
-    preco = preco_atual()
+    # Corrige MultiIndex
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
-    if preco is None:
-        st.error("Erro ao buscar preço do BOVA11.")
-        return
+    cols = ["Open", "High", "Low", "Close", "Volume"]
 
-    st.metric("Preço Atual BOVA11", f"R$ {preco:.2f}")
+    df = df[cols].copy()
 
-    # ---------------------------------------------------
-    # VENCIMENTOS
-    # ---------------------------------------------------
-    exps = vencimentos()
+    # Conversão numérica
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    if not exps:
-        st.error("Yahoo Finance não retornou vencimentos hoje.")
-        return
+    df.dropna(inplace=True)
 
-    hoje = datetime.now()
+    # Reset index
+    df.reset_index(inplace=True)
 
-    validos = []
+    return df
 
-    for v in exps:
-        try:
-            data_v = datetime.strptime(v, "%Y-%m-%d")
-            dias = (data_v - hoje).days
+df = load_data(ticker, period)
 
-            if 1 <= dias <= 15:
-                validos.append(v)
+# =========================================================
+# VALIDAÇÃO
+# =========================================================
 
-        except:
-            pass
+if len(df) < 250:
 
-    if not validos:
-        st.warning("Nenhum vencimento semanal encontrado.")
-        return
+    st.error("Poucos dados para análise.")
 
-    venc = st.selectbox("Escolha o vencimento", validos)
+    st.stop()
 
-    # ---------------------------------------------------
-    # OPTION CHAIN
-    # ---------------------------------------------------
-    chain = buscar_chain(venc)
+# =========================================================
+# INDICADORES
+# =========================================================
 
-    if chain is None:
-        st.error("Erro ao carregar opções.")
-        return
+close = df["Close"].astype(float)
+high = df["High"].astype(float)
+low = df["Low"].astype(float)
+volume = df["Volume"].astype(float)
 
-    if operacao == "PUT":
-        tabela = chain.puts.copy()
-    else:
-        tabela = chain.calls.copy()
+# =========================================================
+# EMAS
+# =========================================================
 
-    if tabela.empty:
-        st.warning("Sem opções disponíveis.")
-        return
+df["EMA21"] = ta.trend.ema_indicator(close, window=21)
+df["EMA50"] = ta.trend.ema_indicator(close, window=50)
+df["EMA200"] = ta.trend.ema_indicator(close, window=200)
 
-    # ---------------------------------------------------
-    # PROCESSAMENTO
-    # ---------------------------------------------------
-    T = (datetime.strptime(venc, "%Y-%m-%d") - hoje).days / 365
+# =========================================================
+# ADX
+# =========================================================
 
-    lista = []
+try:
 
-    for _, row in tabela.iterrows():
+    adx = ta.trend.ADXIndicator(
+        high=high,
+        low=low,
+        close=close,
+        window=14
+    )
 
-        try:
-            strike = float(row["strike"])
+    df["ADX"] = adx.adx()
+    df["DI_POS"] = adx.adx_pos()
+    df["DI_NEG"] = adx.adx_neg()
 
-            bid = float(row["bid"]) if pd.notna(row["bid"]) else 0
-            ask = float(row["ask"]) if pd.notna(row["ask"]) else 0
-            last = float(row["lastPrice"]) if pd.notna(row["lastPrice"]) else 0
+except Exception as e:
 
-            premio = 0
+    st.error(f"Erro no ADX: {e}")
 
-            if bid > 0:
-                premio = bid
-            elif last > 0:
-                premio = last
-            elif ask > 0:
-                premio = ask
+    df["ADX"] = np.nan
+    df["DI_POS"] = np.nan
+    df["DI_NEG"] = np.nan
 
-            if premio <= 0:
-                continue
+# =========================================================
+# ATR
+# =========================================================
 
-            capital = strike if operacao == "PUT" else preco
+atr = ta.volatility.AverageTrueRange(
+    high=high,
+    low=low,
+    close=close,
+    window=14
+)
 
-            retorno = retorno_liquido(premio, capital)
+df["ATR"] = atr.average_true_range()
 
-            if retorno < META_SEMANAL:
-                continue
+# =========================================================
+# RSI
+# =========================================================
 
-            prob = prob_exercicio(
-                preco,
-                strike,
-                T,
-                SELIC,
-                VOL,
-                operacao
-            )
+df["RSI"] = ta.momentum.rsi(close, window=14)
 
-            score = score_operacao(retorno, prob)
+# =========================================================
+# BOLLINGER
+# =========================================================
 
-            lista.append({
-                "Contrato": row["contractSymbol"],
-                "Strike": strike,
-                "Prêmio": premio,
-                "Retorno Líquido (%)": retorno * 100,
-                "Probabilidade (%)": prob * 100,
-                "Score": score
-            })
+bb = ta.volatility.BollingerBands(
+    close=close,
+    window=20,
+    window_dev=2
+)
 
-        except:
-            pass
+df["BB_WIDTH"] = (
+    (bb.bollinger_hband() - bb.bollinger_lband())
+    / close
+)
 
-    # ---------------------------------------------------
-    # RESULTADO
-    # ---------------------------------------------------
-    if not lista:
-        st.warning("Nenhuma operação dentro da meta hoje.")
-        return
+# =========================================================
+# VOLUME MÉDIA
+# =========================================================
 
-    df = pd.DataFrame(lista)
+df["VOL_MA20"] = volume.rolling(20).mean()
 
-    df = df.sort_values(by="Score", ascending=False).head(3)
+# =========================================================
+# REMOVE NAN
+# =========================================================
 
-    df["Strike"] = df["Strike"].map(lambda x: f"R$ {x:.2f}")
-    df["Prêmio"] = df["Prêmio"].map(lambda x: f"R$ {x:.2f}")
-    df["Retorno Líquido (%)"] = df["Retorno Líquido (%)"].map(lambda x: f"{x:.2f}%")
-    df["Probabilidade (%)"] = df["Probabilidade (%)"].map(lambda x: f"{x:.2f}%")
-    df["Score"] = df["Score"].map(lambda x: f"{x:.2f}")
+df.dropna(inplace=True)
 
-    st.subheader("🏆 TOP 3 Oportunidades")
+# =========================================================
+# CURRENT STRUCTURE
+# =========================================================
 
-    st.dataframe(df, use_container_width=True)
+latest = df.iloc[-1]
 
-    st.success("Atualiza automaticamente ao abrir.")
+# =========================================================
+# SCORE
+# =========================================================
 
-    with st.expander("Debug"):
-        st.write("Vencimentos encontrados:", exps)
+score = 0
 
+details = []
 
-if __name__ == "__main__":
-    main()
+# =========================================================
+# TENDÊNCIA
+# =========================================================
+
+if latest["Close"] > latest["EMA21"]:
+    score += 10
+    details.append(("Preço acima EMA21", "✅ +10"))
+else:
+    details.append(("Preço acima EMA21", "❌"))
+
+if latest["EMA21"] > latest["EMA50"]:
+    score += 15
+    details.append(("EMA21 acima EMA50", "✅ +15"))
+else:
+    details.append(("EMA21 acima EMA50", "❌"))
+
+if latest["EMA50"] > latest["EMA200"]:
+    score += 20
+    details.append(("EMA50 acima EMA200", "✅ +20"))
+else:
+    details.append(("EMA50 acima EMA200", "❌"))
+
+# =========================================================
+# FORÇA
+# =========================================================
+
+if latest["ADX"] > 22:
+    score += 15
+    details.append(("ADX forte", "✅ +15"))
+else:
+    details.append(("ADX forte", "❌"))
+
+if latest["DI_POS"] > latest["DI_NEG"]:
+    score += 10
+    details.append(("DI+ acima DI−", "✅ +10"))
+else:
+    details.append(("DI+ acima DI−", "❌"))
+
+# =========================================================
+# MOMENTUM
+# =========================================================
+
+if latest["RSI"] > 55:
+    score += 10
+    details.append(("RSI momentum", "✅ +10"))
+else:
+    details.append(("RSI momentum", "❌"))
+
+# =========================================================
+# VOLUME
+# =========================================================
+
+if latest["Volume"] > latest["VOL_MA20"]:
+    score += 10
+    details.append(("Volume acima média", "✅ +10"))
+else:
+    details.append(("Volume acima média", "❌"))
+
+# =========================================================
+# COMPRESSÃO
+# =========================================================
+
+bb_mean = df["BB_WIDTH"].rolling(50).mean().iloc[-1]
+
+if latest["BB_WIDTH"] < bb_mean:
+    score += 10
+    details.append(("Compressão volatilidade", "✅ +10"))
+else:
+    details.append(("Compressão volatilidade", "❌"))
+
+# =========================================================
+# HISTORICAL MATCH ENGINE
+# =========================================================
+
+historical = []
+
+for i in range(250, len(df) - future_bars):
+
+    row = df.iloc[i]
+
+    local_score = 0
+
+    if row["Close"] > row["EMA21"]:
+        local_score += 10
+
+    if row["EMA21"] > row["EMA50"]:
+        local_score += 15
+
+    if row["EMA50"] > row["EMA200"]:
+        local_score += 20
+
+    if row["ADX"] > 22:
+        local_score += 15
+
+    if row["DI_POS"] > row["DI_NEG"]:
+        local_score += 10
+
+    if row["RSI"] > 55:
+        local_score += 10
+
+    if row["Volume"] > row["VOL_MA20"]:
+        local_score += 10
+
+    local_bb_mean = (
+        df["BB_WIDTH"]
+        .rolling(50)
+        .mean()
+        .iloc[i]
+    )
+
+    if row["BB_WIDTH"] < local_bb_mean:
+        local_score += 10
+
+    similarity = abs(local_score - score)
+
+    future = df.iloc[i + 1:i + 1 + future_bars]
+
+    target = row["Close"] * (1 + target_gain / 100)
+
+    hit = (future["High"] >= target).any()
+
+    historical.append({
+        "score": local_score,
+        "similarity": similarity,
+        "hit": hit
+    })
+
+hist_df = pd.DataFrame(historical)
+
+# =========================================================
+# FILTRO SIMILARIDADE
+# =========================================================
+
+similar_df = hist_df[
+    hist_df["similarity"] <= 5
+].copy()
+
+total_cases = len(similar_df)
+
+wins = similar_df["hit"].sum()
+
+if total_cases > 0:
+    probability = (wins / total_cases) * 100
+else:
+    probability = 0
+
+# =========================================================
+# DASHBOARD
+# =========================================================
+
+st.header(f"🎯 Resultado Atual — {ativo_nome}")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric(
+    "Score Estrutural",
+    f"{score}/100"
+)
+
+col2.metric(
+    "Casos Similares",
+    total_cases
+)
+
+col3.metric(
+    f"Chance de +{target_gain:.1f}%",
+    f"{probability:.2f}%"
+)
+
+# =========================================================
+# INTERPRETAÇÃO
+# =========================================================
+
+st.header("🧠 Interpretação")
+
+if probability >= 70:
+
+    st.success(f"""
+Estrutura historicamente MUITO forte.
+
+Chance histórica de atingir +{target_gain:.1f}%:
+{probability:.1f}%
+""")
+
+elif probability >= 60:
+
+    st.warning(f"""
+Estrutura moderadamente positiva.
+
+Existe vantagem estatística.
+""")
+
+else:
+
+    st.error(f"""
+Estrutura estatisticamente fraca no momento.
+""")
+
+# =========================================================
+# DETALHES
+# =========================================================
+
+st.header("📋 Componentes da Estrutura")
+
+details_df = pd.DataFrame(
+    details,
+    columns=["Fator", "Status"]
+)
+
+st.dataframe(
+    details_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+# =========================================================
+# GRÁFICO
+# =========================================================
+
+st.header("📈 Gráfico")
+
+fig = go.Figure()
+
+fig.add_trace(go.Scatter(
+    x=df["Date"],
+    y=df["Close"],
+    name="Preço"
+))
+
+fig.add_trace(go.Scatter(
+    x=df["Date"],
+    y=df["EMA21"],
+    name="EMA21"
+))
+
+fig.add_trace(go.Scatter(
+    x=df["Date"],
+    y=df["EMA50"],
+    name="EMA50"
+))
+
+fig.add_trace(go.Scatter(
+    x=df["Date"],
+    y=df["EMA200"],
+    name="EMA200"
+))
+
+fig.update_layout(
+    height=700
+)
+
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
+
+# =========================================================
+# WARNING
+# =========================================================
+
+st.markdown("---")
+
+st.warning("""
+IMPORTANTE:
+
+Este modelo NÃO prevê o futuro.
+
+Ele mede:
+
+- estruturas históricas semelhantes
+- comportamento posterior
+- probabilidade condicional
+
+Ou seja:
+
+é um motor estatístico,
+não uma previsão absoluta.
+""")
